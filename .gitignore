@@ -30,6 +30,20 @@ playground.xcworkspace
 # .swiftpm
 
 .build/
+.swiftpm/xcode/xcuserdata/
+
+# Local / generated
+.DS_Store
+.ruff_cache/
+__pycache__/
+*.pyc
+
+# Benchmarks
+Benchmarks/results/
+Benchmarks/.bin/
+Benchmarks/smoltcp/target/
+Benchmarks/gvisor/gvisor-bench
+
 
 # CocoaPods
 #
