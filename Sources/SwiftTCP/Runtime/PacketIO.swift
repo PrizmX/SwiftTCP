@@ -104,16 +104,17 @@ final class RecordingSink: PacketSink, @unchecked Sendable {
 }
 
 /// Counts packets/bytes without retaining payloads. Optional short capture for handshake.
-final class MetricsSink: PacketSink, @unchecked Sendable {
+/// Public so the bench target (`SwiftTCPBench`) and downstream tests can reuse it.
+public final class MetricsSink: PacketSink, @unchecked Sendable {
     private let lock = NSLock()
     private var packets: UInt64 = 0
     private var bytes: UInt64 = 0
     private var captured: [Data] = []
     private var captureLimit = 0
 
-    init() {}
+    public init() {}
 
-    func write(bytes: Data, protocolFamily: UInt8) {
+    public func write(bytes: Data, protocolFamily: UInt8) {
         _ = protocolFamily
         lock.lock()
         packets &+= 1
@@ -124,7 +125,7 @@ final class MetricsSink: PacketSink, @unchecked Sendable {
         lock.unlock()
     }
 
-    func writeBatch(_ items: [(Data, UInt8)]) {
+    public func writeBatch(_ items: [(Data, UInt8)]) {
         guard !items.isEmpty else { return }
         lock.lock()
         for item in items {
@@ -137,20 +138,20 @@ final class MetricsSink: PacketSink, @unchecked Sendable {
         lock.unlock()
     }
 
-    func snapshot() -> (packets: UInt64, bytes: UInt64) {
+    public func snapshot() -> (packets: UInt64, bytes: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         return (packets, bytes)
     }
 
-    func beginCapture(_ limit: Int) {
+    public func beginCapture(_ limit: Int) {
         lock.lock()
         captureLimit = limit
         captured.removeAll(keepingCapacity: true)
         lock.unlock()
     }
 
-    func endCapture() -> [Data] {
+    public func endCapture() -> [Data] {
         lock.lock()
         captureLimit = 0
         let out = captured
@@ -159,7 +160,7 @@ final class MetricsSink: PacketSink, @unchecked Sendable {
         return out
     }
 
-    func reset() {
+    public func reset() {
         lock.lock()
         packets = 0
         bytes = 0
@@ -170,42 +171,43 @@ final class MetricsSink: PacketSink, @unchecked Sendable {
 }
 
 /// Counts delivered bytes / lifecycle events and drops the payload.
-final class DiscardStreamHandler: TCPStreamHandler, @unchecked Sendable {
+/// Public so the bench target (`SwiftTCPBench`) and downstream tests can reuse it.
+public final class DiscardStreamHandler: TCPStreamHandler, @unchecked Sendable {
     private let lock = NSLock()
     private var established: UInt64 = 0
     private var closed: UInt64 = 0
     private var bytes: UInt64 = 0
 
-    init() {}
+    public init() {}
 
-    func onEstablished(flow: FlowKey) {
+    public func onEstablished(flow: FlowKey) {
         _ = flow
         lock.lock()
         established &+= 1
         lock.unlock()
     }
 
-    func onData(flow: FlowKey, data: Data) {
+    public func onData(flow: FlowKey, data: Data) {
         _ = flow
         lock.lock()
         bytes &+= UInt64(data.count)
         lock.unlock()
     }
 
-    func onClosed(flow: FlowKey) {
+    public func onClosed(flow: FlowKey) {
         _ = flow
         lock.lock()
         closed &+= 1
         lock.unlock()
     }
 
-    func snapshot() -> (established: UInt64, closed: UInt64, bytes: UInt64) {
+    public func snapshot() -> (established: UInt64, closed: UInt64, bytes: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         return (established, closed, bytes)
     }
 
-    func reset() {
+    public func reset() {
         lock.lock()
         established = 0
         closed = 0

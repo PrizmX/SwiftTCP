@@ -240,7 +240,7 @@ actor TCPEventLoop {
         var result = ActionEffects()
         for action in actions {
             switch action {
-            case .send(let flags, let seq, let ack, let window, let payload, let options):
+            case .send(let flags, let seq, let ack, _, let payload, let options):
                 let tx = PacketBuilder.tcp(
                     flow: pcb.flow.reversed,
                     seq: seq,
@@ -264,7 +264,7 @@ actor TCPEventLoop {
                         isPureAck: pureAck
                     )
                 )
-            case .sendFromBuffer(let flags, let seq, let ack, let window, let offset, let length, let options):
+            case .sendFromBuffer(let flags, let seq, let ack, _, let offset, let length, let options):
                 guard let ring = pcb.sendBuffer else { break }
                 let tx = PacketBuilder.tcp(
                     flow: pcb.flow.reversed,
