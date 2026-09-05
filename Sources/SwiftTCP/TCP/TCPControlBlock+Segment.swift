@@ -91,7 +91,15 @@ extension TCPControlBlock {
     }
 
     func updateRcvWnd() {
-        rcvWnd = UInt32(recvBuffer?.available ?? maxWindow)
+        let ringAvail = recvBuffer?.available ?? maxWindow
+        let appAvail = max(0, maxWindow - appBuffered)
+        rcvWnd = UInt32(min(ringAvail, appAvail))
+    }
+
+    func creditAppReceive(_ bytes: Int) {
+        guard bytes > 0 else { return }
+        appBuffered = max(0, appBuffered - bytes)
+        updateRcvWnd()
     }
     func shouldEmitDupAck(now: ContinuousClock.Instant) -> Bool {
         if dupAckEmitted < 3 {

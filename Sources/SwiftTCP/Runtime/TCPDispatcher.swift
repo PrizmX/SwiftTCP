@@ -90,6 +90,11 @@ actor TCPDispatcher: TCPByteStream {
         await loops[index].close(flow: flow)
     }
 
+    nonisolated func creditAppReceive(flow: FlowKey, bytes: Int) async {
+        let index = flow.eventLoopIndex(loopCount: loops.count)
+        await loops[index].creditAppReceive(flow: flow, bytes: bytes)
+    }
+
     nonisolated func connect(flow: FlowKey) async {
         let index = flow.eventLoopIndex(loopCount: loops.count)
         await loops[index].connect(flow: flow)

@@ -87,8 +87,17 @@ public actor SwiftStack: TCPByteStream {
         await tcp.close(flow: flow)
     }
 
+    nonisolated public func creditAppReceive(flow: FlowKey, bytes: Int) async {
+        await tcp.creditAppReceive(flow: flow, bytes: bytes)
+    }
+
     nonisolated public func connect(flow: FlowKey) async {
         await tcp.connect(flow: flow)
+    }
+
+    /// Encapsulate a UDP reply toward the TUN client for an ingested flow.
+    nonisolated public func sendDatagram(flow: FlowKey, payload: Data) async {
+        await udp.sendReply(flow: flow, payload: payload)
     }
 
     nonisolated public func shutdown() async {

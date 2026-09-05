@@ -35,6 +35,10 @@ public actor TCPStack: TCPByteStream {
         await dispatcher.close(flow: flow)
     }
 
+    nonisolated public func creditAppReceive(flow: FlowKey, bytes: Int) async {
+        await dispatcher.creditAppReceive(flow: flow, bytes: bytes)
+    }
+
     nonisolated public func connect(flow: FlowKey) async {
         await dispatcher.connect(flow: flow)
     }

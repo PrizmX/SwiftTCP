@@ -109,6 +109,15 @@ actor TCPEventLoop {
         armPoll()
     }
 
+    func creditAppReceive(flow: FlowKey, bytes: Int) {
+        guard bytes > 0, let pcb = pcbs[flow] else { return }
+        let before = pcb.rcvWnd
+        pcb.creditAppReceive(bytes)
+        if pcb.rcvWnd > before {
+            commit([pcb.emitAck(), .cancel(.delayedAck)], pcb: pcb)
+        }
+    }
+
     /// Active open toward `flow.dst`. PCB identity is the guest-originated 4-tuple
     /// (`src` = guest) so later SYN-ACK / data match the same key as TUN ingest.
     func connect(flow: FlowKey) {
@@ -237,7 +246,7 @@ actor TCPEventLoop {
                     seq: seq,
                     ack: ack,
                     flags: flags,
-                    window: window,
+                    window: pcb.advertisedWindow,
                     options: options,
                     payload: payload,
                     pool: txPool
@@ -262,7 +271,7 @@ actor TCPEventLoop {
                     seq: seq,
                     ack: ack,
                     flags: flags,
-                    window: window,
+                    window: pcb.advertisedWindow,
                     options: options,
                     payloadFrom: ring,
                     offset: offset,
@@ -279,6 +288,10 @@ actor TCPEventLoop {
                 )
             case .deliver(let data):
                 result.delivered.append((pcb.flow, data))
+                if !streams.consumesOnData {
+                    pcb.appBuffered += data.count
+                    pcb.updateRcvWnd()
+                }
             case .established:
                 result.established.append(pcb.flow)
             case .closed:

@@ -169,6 +169,9 @@ private func packetData(
     #expect(cubic.cwnd >= before)
     cubic.onLoss()
     #expect(cubic.cwnd < before)
+    cubic.epochStart = ContinuousClock.now.advanced(by: .seconds(-3_600))
+    cubic.onAck(acked: 1460, rtt: .milliseconds(20), inflight: 10 * 1460, now: ContinuousClock.now)
+    #expect(cubic.cwnd <= 4_000_000)
 
     var bbr = BBR(mss: 1460)
     bbr.onAck(acked: 16_000, rtt: .milliseconds(10), inflight: 16_000, now: ContinuousClock().now)

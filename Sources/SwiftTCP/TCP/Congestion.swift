@@ -83,22 +83,24 @@ public struct CUBIC: CongestionControl {
     public mutating func onAck(acked: UInt32, rtt: Duration, inflight: UInt32, now: ContinuousClock.Instant) {
         _ = inflight
         _ = rtt
+        let segment = max(mss, 1)
         if cwnd < ssthresh {
             cwnd = min(cwnd &+ acked, 4_000_000)
             return
         }
         let t: Double
         if let start = epochStart {
-            t = durationSeconds(start.duration(to: now))
+            t = min(durationSeconds(start.duration(to: now)), 1_000)
         } else {
             epochStart = now
             t = 0
         }
-        let wMaxSeg = Double(max(wMax / mss, 1))
+        let wMaxSeg = Double(max(wMax / segment, 1))
         let k = cbrt(wMaxSeg * (1 - beta) / c)
         let dt = t - k
         let wCubic = c * dt * dt * dt + wMaxSeg
-        let cubicCwnd = UInt32(max(wCubic, 2) * Double(mss))
+        let cubicBytes = max(wCubic, 2) * Double(segment)
+        let cubicCwnd = UInt32(min(max(cubicBytes, 0), 4_000_000))
         if cubicCwnd > cwnd {
             cwnd = cubicCwnd
         }

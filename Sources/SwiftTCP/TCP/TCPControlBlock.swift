@@ -30,6 +30,8 @@ final class TCPControlBlock: @unchecked Sendable {
 
     var sendBuffer: ByteRingBuffer?
     var recvBuffer: ByteRingBuffer?
+    /// Bytes delivered to the app that have not been `creditAppReceive`'d yet.
+    var appBuffered = 0
     var reassembly: TCPReassembly
     var maxWindow: Int
     var algorithm: CongestionAlgorithm
@@ -367,6 +369,7 @@ final class TCPControlBlock: @unchecked Sendable {
     func prepareForPool() {
         sendBuffer?.clear()
         recvBuffer?.clear()
+        appBuffered = 0
         reassembly.clear()
         deadlines.clearAll()
         tfoDelivered = false

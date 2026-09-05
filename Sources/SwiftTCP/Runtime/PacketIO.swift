@@ -17,6 +17,13 @@ public protocol TCPStreamHandler: Sendable {
     func onEstablished(flow: FlowKey)
     func onData(flow: FlowKey, data: Data)
     func onClosed(flow: FlowKey)
+    /// When true (default), delivered bytes free the receive window immediately.
+    /// TUN keeps bytes until the splice reads, so it returns false.
+    var consumesOnData: Bool { get }
+}
+
+extension TCPStreamHandler {
+    public var consumesOnData: Bool { true }
 }
 
 public struct NoopStreamHandler: TCPStreamHandler {
@@ -48,6 +55,8 @@ public protocol TCPByteStream: Sendable {
     /// Hop onto the flow's event loop without creating a `Task` when the send buffer can take `data`.
     /// Otherwise falls back to `send` and invokes `completion` with the accepted byte count.
     func sendDetached(flow: FlowKey, data: Data, completion: @escaping @Sendable (Int) -> Void)
+    /// App finished with `bytes` previously delivered; opens the receive window.
+    func creditAppReceive(flow: FlowKey, bytes: Int) async
 }
 
 extension TCPByteStream {
@@ -63,6 +72,8 @@ extension TCPByteStream {
             completion(accepted)
         }
     }
+
+    public func creditAppReceive(flow: FlowKey, bytes: Int) async {}
 }
 
 /// In-memory sink for unit and stress tests. Not used on the TUN path.
