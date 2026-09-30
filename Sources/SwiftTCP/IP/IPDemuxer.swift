@@ -13,7 +13,10 @@ public struct StackMetrics: Sendable, Equatable {
     public var inboundUDP: UInt64 = 0
     public var inboundICMP: UInt64 = 0
     public var droppedUnknown: UInt64 = 0
+    /// IPv4 fragments discarded (malformed, overlapping, over a limit, expired).
     public var droppedFragment: UInt64 = 0
+    /// IPv4 datagrams rebuilt from fragments and routed like any other packet.
+    public var reassembledDatagrams: UInt64 = 0
     public var droppedTruncated: UInt64 = 0
     public var pmtuMessages: UInt64 = 0
     public var pmtuUpdates: UInt64 = 0
@@ -32,6 +35,7 @@ actor IPDemuxer {
     nonisolated let tcp: TCPDispatcher
     nonisolated let udp: UDPHandler
     nonisolated let sink: any PacketSink
+    nonisolated let reassembler = IPv4Reassembler()
     private let metricsBox = MetricsBox()
 
     init(tcp: TCPDispatcher, udp: UDPHandler, sink: any PacketSink, mtu: Int) {
@@ -80,7 +84,7 @@ actor IPDemuxer {
         var outbound: [(Data, UInt8)] = []
         result.tcp.reserveCapacity(packets.count)
 
-        for data in packets {
+        func process(_ data: Data) {
             // TCP hot path: parse IP+TCP headers exactly once here. The demuxer,
             // dispatcher and event loop previously each re-parsed these headers
             // (three parses per packet).
@@ -91,13 +95,13 @@ actor IPDemuxer {
                     outbound.append((icmp.asSharedData(), header.protocolFamily))
                     result.pmtu.append((full.segment.flow, mtu))
                     metricsBox.add { $0.pmtuMessages &+= 1 }
-                    continue
+                    return
                 }
                 metricsBox.add { $0.inboundTCP &+= 1 }
                 result.tcp.append(
                     InboundTCPPacket(flow: full.segment.flow, segment: full.segment, data: data)
                 )
-                continue
+                return
             }
 
             // Non-TCP (or a truncated/malformed TCP segment): route on IP only.
@@ -105,18 +109,26 @@ actor IPDemuxer {
             do {
                 header = try IPHeader.peek(data)
             } catch PacketParseError.fragment {
-                metricsBox.add { $0.droppedFragment &+= 1 }
-                continue
+                switch reassembler.add(data) {
+                case .complete(let datagram):
+                    metricsBox.add { $0.reassembledDatagrams &+= 1 }
+                    process(datagram)
+                case .dropped(let count):
+                    metricsBox.add { $0.droppedFragment &+= UInt64(count) }
+                case .pending:
+                    break
+                }
+                return
             } catch {
                 metricsBox.add { $0.droppedTruncated &+= 1 }
-                continue
+                return
             }
 
             if Self.shouldEmitPacketTooBig(header, mtu: mtu) {
                 let icmp = ICMPHandler.packetTooBig(header: header, original: data, mtu: mtu)
                 outbound.append((icmp.asSharedData(), header.protocolFamily))
                 metricsBox.add { $0.pmtuMessages &+= 1 }
-                continue
+                return
             }
 
             switch Self.classify(header) {
@@ -139,6 +151,10 @@ actor IPDemuxer {
             case .unknown:
                 metricsBox.add { $0.droppedUnknown &+= 1 }
             }
+        }
+
+        for data in packets {
+            process(data)
         }
 
         if !outbound.isEmpty {
