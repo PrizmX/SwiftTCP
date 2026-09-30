@@ -4,7 +4,7 @@ import Network
 
 /// One TUN UDP 5-tuple → one `NWConnection(.udp)` to the original destination.
 public actor NWUDPForwarder: UDPDatagramHandler {
-    private unowned let replies: any UDPReplyPath
+    private weak var replies: (any UDPReplyPath)?
     private let queue = DispatchQueue(label: "swifttcp.udp", qos: .userInitiated)
     private var conns: [FlowKey: NWConnection] = [:]
 
@@ -46,17 +46,25 @@ public actor NWUDPForwarder: UDPDatagramHandler {
     private func receive(flow: FlowKey, connection: NWConnection) {
         connection.receiveMessage { content, _, isComplete, error in
             if let content, !content.isEmpty {
-                Task { await self.replies.sendReply(flow: flow, payload: content) }
+                Task { await self.forwardReply(flow: flow, payload: content) }
             }
             if error != nil || isComplete {
                 Task {
                     await self.handleClosed(flow: flow)
-                    await self.replies.close(flow: flow)
+                    await self.closeReplyPath(flow: flow)
                 }
             } else {
                 Task { await self.receiveAgain(flow: flow) }
             }
         }
+    }
+
+    private func forwardReply(flow: FlowKey, payload: Data) async {
+        await replies?.sendReply(flow: flow, payload: payload)
+    }
+
+    private func closeReplyPath(flow: FlowKey) async {
+        await replies?.close(flow: flow)
     }
 
     private func receiveAgain(flow: FlowKey) {

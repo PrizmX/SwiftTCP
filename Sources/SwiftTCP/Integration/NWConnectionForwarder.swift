@@ -27,27 +27,62 @@ public actor TFOCookieCache {
 }
 
 /// One TUN TCP flow → one `NWConnection` to the original destination.
+/// Stack callbacks are funneled through one `AsyncStream` so per-flow order
+/// (established → data… → peer FIN → closed) is preserved.
 public actor NWConnectionForwarder: TCPStreamHandler {
+    private enum Event: Sendable {
+        case established(FlowKey)
+        case data(FlowKey, Data)
+        case peerFinished(FlowKey)
+        case closed(FlowKey)
+    }
+
     private let queue = DispatchQueue(label: "swifttcp.nwforward")
     private let cookies: TFOCookieCache
     private var conns: [FlowKey: NWConnection] = [:]
     private let stack: any TCPByteStream
+    private nonisolated let events: AsyncStream<Event>.Continuation
 
     public init(stack: any TCPByteStream, cookies: TFOCookieCache = TFOCookieCache()) {
         self.stack = stack
         self.cookies = cookies
+        let (stream, continuation) = AsyncStream.makeStream(of: Event.self)
+        self.events = continuation
+        Task { [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                await self.handle(event)
+            }
+        }
+    }
+
+    deinit {
+        events.finish()
     }
 
     nonisolated public func onEstablished(flow: FlowKey) {
-        Task { await self.handleEstablished(flow: flow) }
+        events.yield(.established(flow))
     }
 
     nonisolated public func onData(flow: FlowKey, data: Data) {
-        Task { await self.handleData(flow: flow, data: data) }
+        events.yield(.data(flow, data))
+    }
+
+    nonisolated public func onPeerFinished(flow: FlowKey) {
+        events.yield(.peerFinished(flow))
     }
 
     nonisolated public func onClosed(flow: FlowKey) {
-        Task { await self.handleClosed(flow: flow) }
+        events.yield(.closed(flow))
+    }
+
+    private func handle(_ event: Event) {
+        switch event {
+        case .established(let flow): handleEstablished(flow: flow)
+        case .data(let flow, let data): handleData(flow: flow, data: data)
+        case .peerFinished(let flow): handlePeerFinished(flow: flow)
+        case .closed(let flow): handleClosed(flow: flow)
+        }
     }
 
     private func handleEstablished(flow: FlowKey) {
@@ -57,6 +92,11 @@ public actor NWConnectionForwarder: TCPStreamHandler {
     private func handleData(flow: FlowKey, data: Data) {
         guard let conn = open(flow: flow) else { return }
         conn.send(content: data, completion: .contentProcessed { _ in })
+    }
+
+    /// Half-close toward the destination once the TUN client sent FIN.
+    private func handlePeerFinished(flow: FlowKey) {
+        conns[flow]?.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in })
     }
 
     private func handleClosed(flow: FlowKey) {
