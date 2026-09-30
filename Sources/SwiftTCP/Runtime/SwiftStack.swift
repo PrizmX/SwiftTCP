@@ -100,6 +100,13 @@ public actor SwiftStack: TCPByteStream {
         await udp.sendReply(flow: flow, payload: payload)
     }
 
+    /// Drop the UDP session for `flow` (guest-originated 4-tuple). The datagram
+    /// handler gets `onUDPSessionClosed(flow:reason: .closed)`; a later datagram
+    /// on the same 4-tuple opens a fresh session.
+    nonisolated public func closeDatagramSession(flow: FlowKey) async {
+        await udp.close(flow: flow)
+    }
+
     nonisolated public func shutdown() async {
         await udp.closeAll()
         await tcp.shutdown()
@@ -112,6 +119,7 @@ public actor SwiftStack: TCPByteStream {
     public func metrics() async -> StackMetrics {
         var snapshot = demuxer.metricsSnapshot()
         snapshot.droppedUDPLimit = await udp.droppedAtCap
+        snapshot.evictedUDPSessions = await udp.evictedAtCap
         return snapshot
     }
 }

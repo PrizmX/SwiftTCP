@@ -14,6 +14,8 @@ actor UDPHandler: UDPReplyPath {
     var maxLifetime: Duration
     var maxSessions: Int
     private(set) var droppedAtCap: UInt64 = 0
+    /// Sessions evicted (least recently used) to admit a new flow at `maxSessions`.
+    private(set) var evictedAtCap: UInt64 = 0
 
     private let sink: any PacketSink
     private var sessions: [FlowKey: Session] = [:]
@@ -72,7 +74,7 @@ actor UDPHandler: UDPReplyPath {
         let flows = Array(sessions.keys)
         sessions.removeAll()
         for flow in flows {
-            upstreamSlot.handler.onClosed(flow: flow)
+            upstreamSlot.handler.onUDPSessionClosed(flow: flow, reason: .shutdown)
         }
     }
 
@@ -86,7 +88,7 @@ actor UDPHandler: UDPReplyPath {
 
     func close(flow: FlowKey) async {
         guard sessions.removeValue(forKey: flow) != nil else { return }
-        upstreamSlot.handler.onClosed(flow: flow)
+        upstreamSlot.handler.onUDPSessionClosed(flow: flow, reason: .closed)
         armPoll()
     }
 
@@ -99,7 +101,9 @@ actor UDPHandler: UDPReplyPath {
         if let existing = sessions[flow] {
             return existing
         }
-        guard sessions.count < maxSessions else { return nil }
+        if sessions.count >= maxSessions, !evictLeastRecentlyUsed() {
+            return nil
+        }
         let created = Session()
         sessions[flow] = created
         return created
@@ -145,8 +149,19 @@ actor UDPHandler: UDPReplyPath {
         }.map(\.key)
         for flow in stale {
             sessions.removeValue(forKey: flow)
-            upstreamSlot.handler.onClosed(flow: flow)
+            upstreamSlot.handler.onUDPSessionClosed(flow: flow, reason: .expired)
         }
+    }
+
+    /// O(n) scan; only runs when the table is full and a new flow arrives.
+    private func evictLeastRecentlyUsed() -> Bool {
+        guard let victim = sessions.min(by: { $0.value.lastSeen < $1.value.lastSeen })?.key else {
+            return false
+        }
+        sessions.removeValue(forKey: victim)
+        evictedAtCap &+= 1
+        upstreamSlot.handler.onUDPSessionClosed(flow: victim, reason: .evicted)
+        return true
     }
 }
 

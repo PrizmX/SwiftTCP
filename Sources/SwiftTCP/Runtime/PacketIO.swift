@@ -33,10 +33,31 @@ public struct NoopStreamHandler: TCPStreamHandler {
     public func onClosed(flow: FlowKey) {}
 }
 
+/// Why a UDP session left the table.
+public enum UDPSessionCloseReason: Sendable, Equatable {
+    /// Idle timeout or max lifetime.
+    case expired
+    /// Table full: least-recently-used session evicted for a new flow.
+    case evicted
+    /// Closed via `UDPReplyPath.close` / `SwiftStack.closeDatagramSession`.
+    case closed
+    /// Stack shutdown.
+    case shutdown
+}
+
 /// Datagram side of a UDP 5-tuple. `SwiftStack` calls these; the handler replies via `UDPReplyPath`.
 public protocol UDPDatagramHandler: Sendable {
     func onDatagram(flow: FlowKey, payload: Data)
     func onClosed(flow: FlowKey)
+    /// UDP-specific close. The stack calls only this; the default forwards to `onClosed(flow:)`.
+    /// Types that are also a `TCPStreamHandler` implement it to tell UDP closes from TCP ones.
+    func onUDPSessionClosed(flow: FlowKey, reason: UDPSessionCloseReason)
+}
+
+extension UDPDatagramHandler {
+    public func onUDPSessionClosed(flow: FlowKey, reason: UDPSessionCloseReason) {
+        onClosed(flow: flow)
+    }
 }
 
 public struct NoopUDPHandler: UDPDatagramHandler {

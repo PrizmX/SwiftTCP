@@ -19,6 +19,8 @@ public struct StackMetrics: Sendable, Equatable {
     public var pmtuUpdates: UInt64 = 0
     public var echoReplies: UInt64 = 0
     public var droppedUDPLimit: UInt64 = 0
+    /// UDP sessions evicted (LRU) to admit new flows at `udpMaxSessions`.
+    public var evictedUDPSessions: UInt64 = 0
 
     public init() {}
 }
