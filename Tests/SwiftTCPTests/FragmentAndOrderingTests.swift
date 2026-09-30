@@ -158,3 +158,105 @@ private final class DatagramRecorder: UDPDatagramHandler, @unchecked Sendable {
     #expect(metrics.droppedFragment == 0)
     await stack.shutdown()
 }
+
+// MARK: - ProxyMux ordering
+
+#if canImport(Network)
+import Network
+
+/// Loopback stand-in for the userspace proxy: records `[id][len][payload]` frames.
+private final class FrameRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private(set) var frames: [(id: UInt32, payload: Data)] = []
+    private var listener: NWListener?
+
+    func start() async throws -> UInt16 {
+        let listener = try NWListener(using: .tcp, on: .any)
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] connection in
+            connection.start(queue: .global())
+            self?.receive(connection)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    listener.stateUpdateHandler = nil
+                    continuation.resume(returning: listener.port?.rawValue ?? 0)
+                case .failed(let error):
+                    listener.stateUpdateHandler = nil
+                    continuation.resume(throwing: error)
+                default:
+                    break
+                }
+            }
+            listener.start(queue: .global())
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+    }
+
+    private func receive(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] content, _, isComplete, error in
+            guard let self else { return }
+            if let content { self.ingest(content) }
+            if !isComplete, error == nil { self.receive(connection) }
+        }
+    }
+
+    private func ingest(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        buffer.append(data)
+        while buffer.count >= 8 {
+            let bytes = [UInt8](buffer.prefix(8))
+            let id = UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16 | UInt32(bytes[2]) << 8 | UInt32(bytes[3])
+            let len = Int(bytes[4]) << 24 | Int(bytes[5]) << 16 | Int(bytes[6]) << 8 | Int(bytes[7])
+            guard buffer.count >= 8 + len else { return }
+            frames.append((id, Data(buffer.dropFirst(8).prefix(len))))
+            buffer = Data(buffer.dropFirst(8 + len))
+        }
+    }
+
+    func snapshot() -> [(id: UInt32, payload: Data)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return frames
+    }
+}
+
+@Test func proxyMuxKeepsPerFlowEventOrder() async throws {
+    let recorder = FrameRecorder()
+    let port = try await recorder.start()
+    defer { recorder.stop() }
+    let mux = ProxyMux(proxy: .init(host: "127.0.0.1", port: port), stack: NoopByteStream())
+    let flow = FlowKey(
+        src: IPAddress(v4: 0x0a00_0002), srcPort: 40_000,
+        dst: IPAddress(v4: 0x0a00_0001), dstPort: 443
+    )
+    // Fired back to back, as the stack does: data used to race ahead of
+    // `established` (and be dropped) or reorder.
+    mux.onEstablished(flow: flow)
+    let chunks = (0..<5_000).map { Data("chunk-\($0);".utf8) }
+    for chunk in chunks { mux.onData(flow: flow, data: chunk) }
+    mux.onClosed(flow: flow)
+
+    for _ in 0..<1_000 where recorder.snapshot().count < chunks.count + 2 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    let frames = recorder.snapshot()
+    #expect(frames.count == chunks.count + 2)
+    #expect(frames.first?.payload.isEmpty == true) // open marker
+    #expect(Array(frames.dropFirst().prefix(chunks.count).map(\.payload)) == chunks)
+    #expect(frames.last?.payload.isEmpty == true) // close marker
+    #expect(Set(frames.map(\.id)).count == 1)
+}
+
+private struct NoopByteStream: TCPByteStream {
+    func send(flow: FlowKey, data: Data) async -> Int { data.count }
+    func close(flow: FlowKey) async {}
+}
+#endif

@@ -4,7 +4,15 @@ import Network
 
 /// mptcpd-style next-hop multiplexing: many TUN flows share one `NWConnection`
 /// to a userspace proxy, framed as `[id:UInt32][len:UInt32][payload]`.
+/// Stack callbacks are funneled through one `AsyncStream` so per-flow order
+/// (established → data… → closed) is preserved.
 public actor ProxyMux: TCPStreamHandler {
+    private enum Event: Sendable {
+        case established(FlowKey)
+        case data(FlowKey, Data)
+        case closed(FlowKey)
+    }
+
     public struct Destination: Hashable, Sendable {
         public var host: String
         public var port: UInt16
@@ -21,22 +29,46 @@ public actor ProxyMux: TCPStreamHandler {
     private var ids: [UInt32: FlowKey] = [:]
     private var nextID: UInt32 = 1
     private var rxRemainder = Data()
+    private nonisolated let events: AsyncStream<Event>.Continuation
 
     public init(proxy: Destination, stack: any TCPByteStream) {
         self.proxy = proxy
         self.stack = stack
+        let (stream, continuation) = AsyncStream.makeStream(of: Event.self)
+        self.events = continuation
+        Task { [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                await self.handle(event)
+            }
+        }
+    }
+
+    deinit {
+        events.finish()
     }
 
     nonisolated public func onEstablished(flow: FlowKey) {
-        Task { await self.handleEstablished(flow: flow) }
+        events.yield(.established(flow))
     }
 
     nonisolated public func onData(flow: FlowKey, data: Data) {
-        Task { await self.handleData(flow: flow, data: data) }
+        events.yield(.data(flow, data))
     }
 
     nonisolated public func onClosed(flow: FlowKey) {
-        Task { await self.handleClosed(flow: flow) }
+        events.yield(.closed(flow))
+    }
+
+    private func handle(_ event: Event) async {
+        switch event {
+        case .established(let flow):
+            await handleEstablished(flow: flow)
+        case .data(let flow, let data):
+            handleData(flow: flow, data: data)
+        case .closed(let flow):
+            handleClosed(flow: flow)
+        }
     }
 
     private func handleEstablished(flow: FlowKey) async {
