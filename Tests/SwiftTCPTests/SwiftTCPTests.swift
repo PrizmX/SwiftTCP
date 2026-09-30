@@ -135,14 +135,18 @@ private func packetData(
         dataOffset: 20,
         payloadOffset: 40,
         payloadLength: payload.count,
-        options: TCPOptions(mss: 1400, windowScale: 7, sackPermitted: true, tfoCookie: Data([1, 2, 3, 4])),
+        options: TCPOptions(
+            mss: 1400, windowScale: 7, sackPermitted: true,
+            tfoCookie: TCPControlBlock.tfoCookie(for: f.src)
+        ),
         ipHeaderLength: 20,
         version: .v4
     )
     let synActions = pcb.onSegment(syn, payload: payload)
     #expect(pcb.state == .synReceived)
-    #expect(synActions.contains { if case .send(let flags, _, _, _, _, _) = $0 { return flags.contains(.syn) && flags.contains(.ack) } else { return false } })
-    #expect(synActions.contains { if case .deliver(let d) = $0 { return d == payload } else { return false } })
+    // Valid cookie: SYN data is ACKed but held until ESTABLISHED.
+    #expect(synActions.contains { if case .send(let flags, _, let ack, _, _, _) = $0 { return flags.contains(.syn) && flags.contains(.ack) && ack == 1006 } else { return false } })
+    #expect(!synActions.contains { if case .deliver = $0 { return true } else { return false } })
 
     let ack = TCPSegment(
         flow: f,
@@ -160,6 +164,7 @@ private func packetData(
     let ackActions = pcb.onSegment(ack, payload: Data())
     #expect(pcb.state == .established)
     #expect(ackActions.contains { if case .established = $0 { return true } else { return false } })
+    #expect(ackActions.contains { if case .deliver(let d) = $0 { return d == payload } else { return false } })
 }
 
 @Test func cubicAndBBRReactToAckAndLoss() {

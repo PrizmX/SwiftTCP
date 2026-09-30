@@ -219,9 +219,11 @@ private func drainDownload(
     #expect(config.tcp.maxMss == 1_340)
 }
 
-@Test func udpMaxSessionsDropsAdditionalFlows() async throws {
+@Test func udpMaxSessionsEvictsLeastRecentlyUsed() async throws {
     let sink = RecordingSink()
     let udp = UDPHandler(sink: sink, maxSessions: 1)
+    let closes = UDPCloseRecorder()
+    udp.setUpstream(closes)
     let flow1 = FlowKey(src: clientAddr, srcPort: 1, dst: serverAddr, dstPort: 53)
     let flow2 = FlowKey(src: clientAddr, srcPort: 2, dst: serverAddr, dstPort: 54)
     let p1 = UDPPacket.encapsulate(flow: flow1, payload: Data([1])).asSharedData()
@@ -229,7 +231,40 @@ private func drainDownload(
     await udp.ingest(header: try IPHeader.peek(p1), packet: p1)
     await udp.ingest(header: try IPHeader.peek(p2), packet: p2)
     #expect(await udp.sessionCount() == 1)
-    #expect(await udp.droppedAtCap == 1)
+    #expect(await udp.droppedAtCap == 0)
+    #expect(await udp.evictedAtCap == 1)
+    #expect(closes.snapshot() == [UDPCloseRecorder.Entry(flow: flow1, reason: .evicted)])
+
+    await udp.close(flow: flow2)
+    #expect(await udp.sessionCount() == 0)
+    #expect(closes.snapshot().last == UDPCloseRecorder.Entry(flow: flow2, reason: .closed))
+}
+
+private final class UDPCloseRecorder: UDPDatagramHandler, @unchecked Sendable {
+    struct Entry: Equatable {
+        var flow: FlowKey
+        var reason: UDPSessionCloseReason
+    }
+
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+
+    func onDatagram(flow: FlowKey, payload: Data) {}
+    func onClosed(flow: FlowKey) {
+        Issue.record("UDP close must go through onUDPSessionClosed")
+    }
+
+    func onUDPSessionClosed(flow: FlowKey, reason: UDPSessionCloseReason) {
+        lock.lock()
+        entries.append(Entry(flow: flow, reason: reason))
+        lock.unlock()
+    }
+
+    func snapshot() -> [Entry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries
+    }
 }
 
 #if canImport(Network)

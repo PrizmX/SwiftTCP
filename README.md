@@ -89,7 +89,7 @@ final class TunnelProvider: NEPacketTunnelProvider {
 
 You can also copy [`Examples/PacketTunnelProvider.swift`](Examples/PacketTunnelProvider.swift) into a Packet Tunnel target and set `streamHandler` before `startTunnel`.
 
-Congestion control defaults to CUBIC; switch to `.bbr` if needed. TFO: a SYN with payload can `deliver` before the handshake completes. Share one next hop across many flows with `ProxyMux` (length-framed). For a custom UDP upstream, implement `UDPDatagramHandler` and pass it to `SwiftStack`.
+Congestion control defaults to CUBIC; switch to `.bbr` if needed. TFO: the stack issues its own cookie on a cookie request; SYN data is accepted only with a valid cookie and is delivered after `onEstablished` (otherwise only the SYN is ACKed and the client resends the data). A peer FIN is reported via `TCPStreamHandler.onPeerFinished` (half-close). Share one next hop across many flows with `ProxyMux` (length-framed). For a custom UDP upstream, implement `UDPDatagramHandler` and pass it to `SwiftStack`.
 
 ## Benchmarks
 
