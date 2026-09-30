@@ -60,6 +60,10 @@ final class TCPControlBlock: @unchecked Sendable {
     /// App called close(); FIN is deferred until `unsentCount == 0`.
     var closePending = false
     var finSent = false
+    /// Our TFO cookie for the SYN-ACK (only when the client asked and TFO is enabled).
+    var synAckCookie: Data?
+    /// Absolute cap for the send ring (see `maxSendBytes`).
+    var sendBufferLimit: Int
 
     init(
         flow: FlowKey,
@@ -68,9 +72,11 @@ final class TCPControlBlock: @unchecked Sendable {
         window: Int = 64 * 1024,
         algorithm: CongestionAlgorithm = .cubic,
         timerConfig: TCPTimerConfig = .init(),
-        maxMss: UInt16 = 1460
+        maxMss: UInt16 = 1460,
+        sendBufferLimit: Int = TCPStackConfig.defaultSendBufferLimit
     ) {
         self.flow = flow
+        self.sendBufferLimit = sendBufferLimit
         self.state = state
         self.iss = iss
         self.sndUna = iss
@@ -400,7 +406,8 @@ final class TCPControlBlock: @unchecked Sendable {
         algorithm: CongestionAlgorithm,
         timerConfig: TCPTimerConfig,
         tfo: Bool,
-        maxMss: UInt16 = 1460
+        maxMss: UInt16 = 1460,
+        sendBufferLimit: Int = TCPStackConfig.defaultSendBufferLimit
     ) {
         let want = window.nextPowerOfTwo
         if sendBuffer?.capacity != want { sendBuffer = nil }
@@ -424,6 +431,7 @@ final class TCPControlBlock: @unchecked Sendable {
         self.congestion = CongestionState(algorithm: algorithm, mss: UInt32(self.maxMss))
         self.tfoEnabled = tfo
         self.tfoDelivered = false
+        self.sendBufferLimit = sendBufferLimit
         self.maxWindow = window
         self.algorithm = algorithm
         self.reassembly = TCPReassembly(

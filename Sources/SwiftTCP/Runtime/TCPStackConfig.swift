@@ -6,10 +6,15 @@ public struct TCPStackConfig: Sendable {
     public var receiveWindow: Int
     public var tfo: Bool
     public var timers: TCPTimerConfig
-    /// Hard cap on concurrent PCBs per EventLoop (SYN-flood / leak ceiling).
+    /// Hard cap on concurrent PCBs across all EventLoops (SYN-flood / leak ceiling).
     public var maxConnections: Int
     /// Upper bound for our advertised MSS and the peer's SYN MSS option.
     public var maxMss: UInt16
+    /// Per-connection send ring cap in bytes. The ring grows up to
+    /// `min(4 * receiveWindow, sendBufferLimit)` but never below one window.
+    public var sendBufferLimit: Int
+
+    public static let defaultSendBufferLimit = 256 * 1024
 
     public init(
         loopCount: Int = max(1, ProcessInfo.processInfo.activeProcessorCount),
@@ -18,7 +23,8 @@ public struct TCPStackConfig: Sendable {
         tfo: Bool = true,
         timers: TCPTimerConfig = .init(),
         maxConnections: Int = 8_192,
-        maxMss: UInt16 = 1460
+        maxMss: UInt16 = 1460,
+        sendBufferLimit: Int = TCPStackConfig.defaultSendBufferLimit
     ) {
         self.loopCount = loopCount
         self.algorithm = algorithm
@@ -27,5 +33,6 @@ public struct TCPStackConfig: Sendable {
         self.timers = timers
         self.maxConnections = maxConnections
         self.maxMss = max(1, maxMss)
+        self.sendBufferLimit = max(1, sendBufferLimit)
     }
 }

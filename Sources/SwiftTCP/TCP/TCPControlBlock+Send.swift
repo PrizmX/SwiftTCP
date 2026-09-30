@@ -7,9 +7,11 @@ extension TCPControlBlock {
         return buffered - inFlightData
     }
 
+    /// Send ring cap: up to 4x the window, bounded by `sendBufferLimit`, never below one window.
     var maxSendBytes: Int {
         let scaled = maxWindow <= Int.max / 4 ? maxWindow * 4 : Int.max / 2
-        return max(maxWindow.nextPowerOfTwo, scaled.nextPowerOfTwo)
+        let bounded = min(scaled, max(sendBufferLimit, 1))
+        return max(maxWindow.nextPowerOfTwo, bounded.nextPowerOfTwo)
     }
 
     /// Copy into the send ring, growing up to `maxSendBytes` instead of dropping.

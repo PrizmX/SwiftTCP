@@ -14,18 +14,26 @@ actor TCPEventLoop {
     private let sink: any PacketSink
     private let streams: any TCPStreamHandler
     private let config: TCPStackConfig
+    private let budget: ConnectionBudget
     private var sendWaiters: [FlowKey: [CheckedContinuation<Void, Never>]] = [:]
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         executor.asUnownedSerialExecutor()
     }
 
-    init(id: Int, config: TCPStackConfig, sink: any PacketSink, streams: any TCPStreamHandler) {
+    init(
+        id: Int,
+        config: TCPStackConfig,
+        sink: any PacketSink,
+        streams: any TCPStreamHandler,
+        budget: ConnectionBudget? = nil
+    ) {
         self.id = id
         self.executor = LoopExecutor(label: "swifttcp.loop.\(id)")
         self.sink = sink
         self.streams = streams
         self.config = config
+        self.budget = budget ?? ConnectionBudget(limit: config.maxConnections)
     }
 
     func connectionCount() -> Int { pcbs.count }
@@ -121,7 +129,7 @@ actor TCPEventLoop {
     /// Active open toward `flow.dst`. PCB identity is the guest-originated 4-tuple
     /// (`src` = guest) so later SYN-ACK / data match the same key as TUN ingest.
     func connect(flow: FlowKey) {
-        guard pcbs[flow] == nil, pcbs.count < config.maxConnections else { return }
+        guard pcbs[flow] == nil, budget.tryAcquire() else { return }
         let pcb = makePCB(flow: flow)
         pcbs[flow] = pcb
         commit(pcb.onAppConnect(), pcb: pcb)
@@ -178,7 +186,7 @@ actor TCPEventLoop {
         if let existing = pcbs[key] {
             pcb = existing
         } else if segment.hasSYN && !segment.hasRST {
-            guard pcbs.count < config.maxConnections else {
+            guard budget.tryAcquire() else {
                 return rstForUnknown(segment: segment, payloadLength: payload.count)
             }
             let created = makePCB(flow: key)
@@ -392,7 +400,8 @@ actor TCPEventLoop {
                 algorithm: config.algorithm,
                 timerConfig: config.timers,
                 tfo: config.tfo,
-                maxMss: config.maxMss
+                maxMss: config.maxMss,
+                sendBufferLimit: config.sendBufferLimit
             )
             return pcb
         }
@@ -402,7 +411,8 @@ actor TCPEventLoop {
             window: config.receiveWindow,
             algorithm: config.algorithm,
             timerConfig: config.timers,
-            maxMss: config.maxMss
+            maxMss: config.maxMss,
+            sendBufferLimit: config.sendBufferLimit
         )
         created.tfoEnabled = config.tfo
         return created

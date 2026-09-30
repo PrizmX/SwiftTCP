@@ -34,6 +34,20 @@ public struct TCPSlice: Sendable {
         try body(UnsafeRawBufferPointer(start: storage.pointer.advanced(by: start), count: count))
     }
 
+    /// Copy into a private allocation so the slice no longer pins the whole packet.
+    public func ownedCopy() -> TCPSlice {
+        guard count > 0 else { return self }
+        let owned = PacketStorage(capacity: count)
+        owned.pointer.copyMemory(from: storage.pointer.advanced(by: start), byteCount: count)
+        return TCPSlice(storage: owned, start: 0, count: count)
+    }
+
+    init(storage: PacketStorage, start: Int, count: Int) {
+        self.storage = storage
+        self.start = start
+        self.count = count
+    }
+
     public borrowing func asSharedData() -> Data {
         let base = storage.pointer.advanced(by: start)
         let n = count
@@ -45,8 +59,10 @@ public struct TCPSlice: Sendable {
 }
 
 /// Out-of-order receive queue. Segments are clipped to `[rcvNxt, rcvNxt+rcvWnd)`,
-/// overlaps are trimmed in place (new bytes win), and both hole-count and byte
-/// caps bound memory without coalescing copies.
+/// overlaps are trimmed in place (new bytes win). Out-of-order bytes are copied
+/// out of the packet so `maxBytes` reflects retained memory; region, segment and
+/// byte caps bound the queue. In-order data (seq == rcvNxt) stays zero-copy and
+/// bypasses the caps because the caller drains it immediately.
 public struct TCPReassembly: Sendable {
     public struct Hole: Sendable {
         public var seq: UInt32
@@ -72,10 +88,13 @@ public struct TCPReassembly: Sendable {
 
     public let maxHoles: Int
     public let maxBytes: Int
+    /// Absolute cap on stored segments (adjacent segments share a region but not an entry).
+    public let maxSegments: Int
 
-    public init(maxHoles: Int = 32, maxBytes: Int = TCPReassembly.defaultMaxBytes) {
+    public init(maxHoles: Int = 32, maxBytes: Int = TCPReassembly.defaultMaxBytes, maxSegments: Int? = nil) {
         self.maxHoles = max(1, maxHoles)
         self.maxBytes = max(1, maxBytes)
+        self.maxSegments = max(1, maxSegments ?? self.maxHoles * 8)
     }
 
     public var holeCount: Int { holes.count }
@@ -132,16 +151,22 @@ public struct TCPReassembly: Sendable {
     @discardableResult
     public mutating func insert(seq: UInt32, data: Data, rcvNxt: UInt32, rcvWnd: UInt32) -> Bool {
         discardStale(before: rcvNxt)
-        guard let incoming = clipped(seq: seq, data: data, rcvNxt: rcvNxt, rcvWnd: rcvWnd) else {
+        guard var incoming = clipped(seq: seq, data: data, rcvNxt: rcvNxt, rcvWnd: rcvWnd) else {
             return false
         }
-        let added = incoming.slice.count - overlapBytes(incoming)
-        if storedBytes + max(0, added) > maxBytes {
-            return false
-        }
-        let joins = holes.contains { overlapsOrAdjacent($0, incoming) }
-        if !joins, regionCount >= maxHoles {
-            return false
+        if incoming.seq != rcvNxt {
+            if holes.count >= maxSegments {
+                return false
+            }
+            let added = incoming.slice.count - overlapBytes(incoming)
+            if storedBytes + max(0, added) > maxBytes {
+                return false
+            }
+            let joins = holes.contains { overlapsOrAdjacent($0, incoming) }
+            if !joins, regionCount >= maxHoles {
+                return false
+            }
+            incoming.slice = incoming.slice.ownedCopy()
         }
         subtractOverlaps(incoming)
         storedBytes += incoming.slice.count

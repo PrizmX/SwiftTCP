@@ -1,4 +1,27 @@
 import Foundation
+import os
+
+/// Stack-wide PCB count shared by all loops so `maxConnections` is a global cap.
+final class ConnectionBudget: Sendable {
+    let limit: Int
+    private let used = OSAllocatedUnfairLock(initialState: 0)
+
+    init(limit: Int) { self.limit = max(0, limit) }
+
+    func tryAcquire() -> Bool {
+        used.withLock { n in
+            guard n < limit else { return false }
+            n += 1
+            return true
+        }
+    }
+
+    func release() {
+        used.withLock { n in n = max(0, n - 1) }
+    }
+
+    var inUse: Int { used.withLock { $0 } }
+}
 
 /// Hashes each 4-tuple onto a fixed EventLoop for the life of the connection.
 /// `ingestBatch` / `send` are `nonisolated` so callers hop once — onto the loop —
@@ -9,8 +32,9 @@ actor TCPDispatcher: TCPByteStream {
 
     init(config: TCPStackConfig, sink: any PacketSink, streams: any TCPStreamHandler) {
         self.config = config
+        let budget = ConnectionBudget(limit: config.maxConnections)
         self.loops = (0..<config.loopCount).map { id in
-            TCPEventLoop(id: id, config: config, sink: sink, streams: streams)
+            TCPEventLoop(id: id, config: config, sink: sink, streams: streams, budget: budget)
         }
     }
 
