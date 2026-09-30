@@ -97,7 +97,8 @@ public struct TCPOptions: Sendable, Equatable {
                         o += 8
                     }
                     sackBlocks = blocks
-                case 34 where len >= 2:
+                case 34 where len == 2 || (6...18).contains(len):
+                    // RFC 7413: empty = cookie request, otherwise 4...16 bytes.
                     tfoCookie = Data(bytes[i + 2..<i + len])
                 default:
                     break
@@ -108,7 +109,11 @@ public struct TCPOptions: Sendable, Equatable {
         return TCPOptions(mss: mss, windowScale: windowScale, sackPermitted: sackPermitted, tfoCookie: tfoCookie, sackBlocks: sackBlocks)
     }
 
+    /// TCP options never exceed 40 bytes; entries that don't fit are dropped.
+    public static let maxEncodedLength = 40
+
     public func encoded() -> Data {
+        let limit = Self.maxEncodedLength
         var out = Data()
         if let mss {
             out.append(contentsOf: [2, 4, UInt8(mss >> 8), UInt8(truncatingIfNeeded: mss)])
@@ -119,7 +124,7 @@ public struct TCPOptions: Sendable, Equatable {
         if sackPermitted {
             out.append(contentsOf: [4, 2])
         }
-        let nSACK = min(4, sackBlocks.count)
+        let nSACK = min(4, sackBlocks.count, max(0, (limit - out.count - 2) / 8))
         if nSACK > 0 {
             out.append(5)
             out.append(UInt8(2 + nSACK * 8))
@@ -128,7 +133,7 @@ public struct TCPOptions: Sendable, Equatable {
                 appendBE32(block.right, to: &out)
             }
         }
-        if let tfoCookie {
+        if let tfoCookie, tfoCookie.count <= 16, out.count + 2 + tfoCookie.count <= limit {
             out.append(34)
             out.append(UInt8(2 + tfoCookie.count))
             out.append(tfoCookie)

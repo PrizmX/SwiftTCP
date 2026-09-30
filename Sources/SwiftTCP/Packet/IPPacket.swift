@@ -240,7 +240,7 @@ public enum PacketBuilder: Sendable {
         guard case .v4(let src) = flow.src.kind, case .v4(let dst) = flow.dst.kind else {
             preconditionFailure("tcpIPv4 requires IPv4 FlowKey")
         }
-        let optionBytes = options.encoded()
+        let optionBytes = encodedOptions(options)
         let tcpHeader = 20 + optionBytes.count
         let payloadCount = payloadA.count + payloadB.count
         let total = 20 + tcpHeader + payloadCount
@@ -289,7 +289,7 @@ public enum PacketBuilder: Sendable {
         guard case .v4(let src) = flow.src.kind, case .v4(let dst) = flow.dst.kind else {
             preconditionFailure("tcpIPv4 requires IPv4 FlowKey")
         }
-        let optionBytes = options.encoded()
+        let optionBytes = encodedOptions(options)
         let tcpHeader = 20 + optionBytes.count
         let total = 20 + tcpHeader + payloadCount
         var buffer = makeBuffer(minimumCapacity: max(total, 64), pool: pool)
@@ -336,7 +336,7 @@ public enum PacketBuilder: Sendable {
         guard case .v6(let srcHigh, let srcLow) = flow.src.kind, case .v6(let dstHigh, let dstLow) = flow.dst.kind else {
             preconditionFailure("tcpIPv6 requires IPv6 FlowKey")
         }
-        let optionBytes = options.encoded()
+        let optionBytes = encodedOptions(options)
         let tcpHeader = 20 + optionBytes.count
         let payloadCount = payloadA.count + payloadB.count
         let payloadLen = tcpHeader + payloadCount
@@ -395,7 +395,7 @@ public enum PacketBuilder: Sendable {
         guard case .v6(let srcHigh, let srcLow) = flow.src.kind, case .v6(let dstHigh, let dstLow) = flow.dst.kind else {
             preconditionFailure("tcpIPv6 requires IPv6 FlowKey")
         }
-        let optionBytes = options.encoded()
+        let optionBytes = encodedOptions(options)
         let tcpHeader = 20 + optionBytes.count
         let payloadLen = tcpHeader + payloadCount
         let total = 40 + payloadLen
@@ -435,6 +435,12 @@ public enum PacketBuilder: Sendable {
             tcpLength: payloadLen
         )
         return buffer
+    }
+
+    /// Data offset is 4 bits (max 60-byte header): never emit more than 40 option bytes.
+    private static func encodedOptions(_ options: TCPOptions) -> Data {
+        let bytes = options.encoded()
+        return bytes.count <= TCPOptions.maxEncodedLength ? bytes : Data()
     }
 
     private static func makeBuffer(minimumCapacity: Int, pool: TXBufferPool?) -> PacketBuffer {
