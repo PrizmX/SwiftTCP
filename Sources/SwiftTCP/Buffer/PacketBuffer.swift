@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Shared backing store. Slices retain this object (ARC on the handle only);
 /// packet bytes are never copied.
@@ -56,41 +57,48 @@ public final class PacketStorage: @unchecked Sendable {
 
 /// Per-EventLoop slab recycler for TX `PacketStorage`. In-flight `Data` retains
 /// the storage (and thus the pool), so recycling is safe after the loop closes.
+/// `recycle` runs on whichever thread drops the last `Data` (e.g. inside
+/// `NEPacketTunnelFlow.writePackets`), so the free list is behind an unfair lock.
 public final class TXBufferPool: @unchecked Sendable {
-    private var free: [UnsafeMutableRawPointer] = []
+    private let free: OSAllocatedUnfairLock<[UnsafeMutableRawPointer]>
     public let slab: Int
     private let maxIdle: Int
 
     public init(slab: Int = 2048, maxIdle: Int = 128) {
         self.slab = slab
         self.maxIdle = maxIdle
+        var list: [UnsafeMutableRawPointer] = []
+        list.reserveCapacity(maxIdle)
+        self.free = OSAllocatedUnfairLock(uncheckedState: list)
     }
 
     public func take(minimumCapacity: Int) -> PacketStorage {
-        if minimumCapacity <= slab, let ptr = free.popLast() {
-            return PacketStorage(pooled: ptr, capacity: slab, pool: self)
+        guard minimumCapacity <= slab else {
+            return PacketStorage(capacity: minimumCapacity)
         }
-        if minimumCapacity <= slab {
-            let ptr = UnsafeMutableRawPointer.allocate(
-                byteCount: slab,
-                alignment: MemoryLayout<UInt64>.alignment
-            )
-            return PacketStorage(pooled: ptr, capacity: slab, pool: self)
-        }
-        return PacketStorage(capacity: minimumCapacity)
+        let reused = free.withLockUnchecked { $0.popLast() }
+        let ptr = reused ?? UnsafeMutableRawPointer.allocate(
+            byteCount: slab,
+            alignment: MemoryLayout<UInt64>.alignment
+        )
+        return PacketStorage(pooled: ptr, capacity: slab, pool: self)
     }
 
     fileprivate func recycle(_ pointer: UnsafeMutableRawPointer) {
-        if free.count < maxIdle {
-            free.append(pointer)
-        } else {
-            pointer.deallocate()
+        let kept = free.withLockUnchecked { list -> Bool in
+            guard list.count < maxIdle else { return false }
+            list.append(pointer)
+            return true
         }
+        if !kept { pointer.deallocate() }
     }
 
+    var idleCount: Int { free.withLockUnchecked { $0.count } }
+
     deinit {
-        for pointer in free {
-            pointer.deallocate()
+        free.withLockUnchecked { list in
+            for pointer in list { pointer.deallocate() }
+            list.removeAll()
         }
     }
 }
