@@ -86,9 +86,13 @@ extension TCPControlBlock {
             ? min(Int(mss), remaining, max(Int(sndWnd), 1))
             : min(Int(mss), remaining, cwndLeft, windowLeft)
         guard budget > 0 else { return nil }
-        if rttProbeSeq == nil {
-            rttProbeSeq = seq
-            rttProbeTime = lastActivity
+        if retransmit {
+            // Karn: never sample a sequence range that was retransmitted.
+            rttProbeSeq = nil
+            rttProbeTime = nil
+        } else if rttProbeSeq == nil {
+            rttProbeSeq = seq &+ UInt32(budget)
+            rttProbeTime = ContinuousClock().now
         }
         if !retransmit {
             sndNxt &+= UInt32(budget)

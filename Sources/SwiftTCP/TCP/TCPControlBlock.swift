@@ -130,6 +130,14 @@ final class TCPControlBlock: @unchecked Sendable {
 
     var inflight: UInt32 { sndNxt &- sndUna }
 
+    /// States reached only after the peer's FIN was consumed.
+    static func peerFinReceived(_ state: TCPState) -> Bool {
+        switch state {
+        case .closeWait, .lastAck, .closing, .timeWait: true
+        default: false
+        }
+    }
+
     /// Bytes that still fit under the send-buffer cap (including grow room).
     var sendAvailable: Int {
         max(0, maxSendBytes - (sendBuffer?.count ?? 0))
@@ -169,10 +177,27 @@ final class TCPControlBlock: @unchecked Sendable {
         } else {
             smSegment.flags.remove(.fin)
         }
+        // Once our FIN is out, only an ACK covering it (SND.UNA == SND.NXT) counts as ACK.
+        switch state {
+        case .finWait1, .closing, .lastAck:
+            if Seq.lt(sndUna, sndNxt) { smSegment.flags.remove(.ack) }
+        default:
+            break
+        }
+        let stateBefore = state
         let (next, kinds) = TCPStateMachine.transition(state: state, event: .segment(smSegment))
         var actions = kinds.flatMap { expand($0, segment: segment, payload: payload) }
         state = next
         lastActivity = now
+        if acceptedFIN {
+            actions.append(.peerFinished)
+        } else if segment.hasFIN, !suppressAck, Self.peerFinReceived(stateBefore) {
+            // Retransmitted FIN: our ACK was lost. Re-ACK (and restart 2MSL in TIME-WAIT).
+            actions.append(emitAck())
+            if state == .timeWait {
+                actions.append(.schedule(.timeWait, timerConfig.timeWait))
+            }
+        }
         if newlyAcked {
             if inflight == 0 {
                 actions.append(.cancel(.retransmission))
@@ -244,20 +269,14 @@ final class TCPControlBlock: @unchecked Sendable {
         state = .synSent
         sndNxt = iss &+ 1
         lastActivity = now
-        let opts = TCPOptions(
-            mss: maxMss,
-            windowScale: rcvWndShift,
-            sackPermitted: true,
-            tfoCookie: nil
-        )
         var actions: [TCPAction] = [
             .send(
                 flags: .syn,
                 seq: iss,
                 ack: 0,
-                window: advertisedWindow,
+                window: synWindow,
                 payload: Data(),
-                options: opts
+                options: synOptions()
             ),
             .schedule(.retransmission, rtt.rto),
         ]
@@ -394,6 +413,7 @@ final class TCPControlBlock: @unchecked Sendable {
         windowScaleEnabled = false
         closePending = false
         finSent = false
+        synAckCookie = nil
         sackScoreboard = []
         recoveryMark = nil
         highRxt = nil

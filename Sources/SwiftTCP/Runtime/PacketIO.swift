@@ -16,6 +16,9 @@ extension PacketSink {
 public protocol TCPStreamHandler: Sendable {
     func onEstablished(flow: FlowKey)
     func onData(flow: FlowKey, data: Data)
+    /// Peer sent FIN (half-close): no more `onData` for `flow`, but the stack can
+    /// still `send` until the app calls `close`. Called after the final `onData`.
+    func onPeerFinished(flow: FlowKey)
     func onClosed(flow: FlowKey)
     /// When true (default), delivered bytes free the receive window immediately.
     /// TUN keeps bytes until the splice reads, so it returns false.
@@ -24,6 +27,7 @@ public protocol TCPStreamHandler: Sendable {
 
 extension TCPStreamHandler {
     public var consumesOnData: Bool { true }
+    public func onPeerFinished(flow: FlowKey) {}
 }
 
 public struct NoopStreamHandler: TCPStreamHandler {

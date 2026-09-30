@@ -24,6 +24,8 @@ extension TCPControlBlock {
             guard let hole = nextLostSegment(after: nextSeq) else { break }
             guard let rexmit = emitRetransmit(from: hole.seq, limit: hole.length) else { break }
             actions.append(rexmit)
+            rttProbeSeq = nil
+            rttProbeTime = nil
             if case .sendFromBuffer(_, _, _, _, _, let length, _) = rexmit {
                 nextSeq = hole.seq &+ UInt32(length)
                 highRxt = nextSeq

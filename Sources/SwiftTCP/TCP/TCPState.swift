@@ -44,6 +44,8 @@ public enum TCPAction: Sendable {
         offset: Int, length: Int, options: TCPOptions
     )
     case deliver(Data)
+    /// Peer's FIN was accepted in order: no more inbound bytes (half-close).
+    case peerFinished
     case established
     case closed
     case reset
@@ -79,16 +81,21 @@ public enum TCPStateMachine: Sendable {
             return (.synReceived, [.sendSynAck, .scheduleRetransmit])
 
         case (.listen, .segment(let s)) where s.hasSYN && !s.hasRST:
-            return (.synReceived, [.sendSynAck, .scheduleRetransmit, .deliverData])
+            // Accepted TFO data stays queued until ESTABLISHED.
+            return (.synReceived, [.sendSynAck, .scheduleRetransmit])
 
         case (.synReceived, .segment(let s)) where s.hasRST:
             return (.closed, [.closed])
+
+        case (.synReceived, .segment(let s)) where s.hasSYN && !s.hasACK:
+            // Retransmitted SYN: our SYN-ACK was lost.
+            return (.synReceived, [.sendSynAck])
 
         case (.synReceived, .segment(let s)) where s.hasACK && !s.hasRST:
             return (.established, [.cancelRetransmit, .established, .ackIfNeeded, .deliverData])
 
         case (.synSent, .segment(let s)) where s.hasSYN && s.hasACK:
-            return (.established, [.cancelRetransmit, .sendAck, .established])
+            return (.established, [.cancelRetransmit, .sendAck, .established, .deliverData])
 
         case (.synSent, .segment(let s)) where s.hasSYN && !s.hasACK:
             return (.synReceived, [.sendSynAck])
@@ -109,20 +116,31 @@ public enum TCPStateMachine: Sendable {
         case (.established, .appSend):
             return (.established, [.sendData, .scheduleRetransmit])
 
+        // FIN-WAIT: `hasACK` means the ACK covers our FIN (the TCB strips it otherwise).
+        // Peer data is still delivered and ACKed after our FIN (half-close).
         case (.finWait1, .segment(let s)) where s.hasFIN && s.hasACK:
-            return (.timeWait, [.sendAck, .scheduleTimeWait])
+            return (.timeWait, [.cancelRetransmit, .deliverData, .sendAck, .scheduleTimeWait])
 
         case (.finWait1, .segment(let s)) where s.hasFIN:
-            return (.closing, [.sendAck])
+            return (.closing, [.deliverData, .sendAck])
 
         case (.finWait1, .segment(let s)) where s.hasACK:
-            return (.finWait2, [.cancelRetransmit, .deliverData])
+            return (.finWait2, [.cancelRetransmit, .deliverData, .ackIfNeeded])
+
+        case (.finWait1, .segment(let s)) where !s.hasRST:
+            return (.finWait1, [.deliverData, .ackIfNeeded])
 
         case (.finWait2, .segment(let s)) where s.hasFIN:
-            return (.timeWait, [.sendAck, .scheduleTimeWait])
+            return (.timeWait, [.deliverData, .sendAck, .scheduleTimeWait])
+
+        case (.finWait2, .segment(let s)) where !s.hasRST:
+            return (.finWait2, [.deliverData, .ackIfNeeded])
 
         case (.closing, .segment(let s)) where s.hasACK:
             return (.timeWait, [.scheduleTimeWait])
+
+        case (.closeWait, .appSend):
+            return (.closeWait, [.sendData, .scheduleRetransmit])
 
         case (.closeWait, .appClose):
             return (.lastAck, [.sendFin, .scheduleRetransmit])

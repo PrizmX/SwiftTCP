@@ -1,11 +1,22 @@
 import Foundation
 
 extension TCPControlBlock {
-    func applyPassive(segment: TCPSegment, payload: Data, now: ContinuousClock.Instant) {
+    func applyPassive(segment: TCPSegment, payload rawPayload: Data, now: ContinuousClock.Instant) {
         let opening = state == .listen || state == .synSent || state == .closed
+        var payload = rawPayload
+        if segment.hasSYN {
+            // RFC 7413: passive SYN data only with a valid cookie; otherwise ACK just the SYN
+            // so the client retransmits it after the handshake.
+            let passive = state == .listen || state == .closed
+            let acceptData = opening && (!passive || tfoCookieValid(segment.options.tfoCookie))
+            if !acceptData { payload = Data() }
+        }
         if segment.hasSYN, opening {
             irs = segment.seq
             rcvNxt = segment.seq &+ 1
+            if tfoEnabled, segment.options.tfoCookie != nil {
+                synAckCookie = Self.tfoCookie(for: flow.src)
+            }
             if let peerMss = segment.options.mss, peerMss > 0 {
                 self.mss = min(peerMss, maxMss)
             }
@@ -30,6 +41,7 @@ extension TCPControlBlock {
                 sndUna = segment.ack
                 dupAcks = 0
                 retransmitCount = 0
+                // `rttProbeSeq` is the probe's end; Karn's rule clears it on retransmit.
                 if let probe = rttProbeSeq, Seq.leq(probe, segment.ack), let t0 = rttProbeTime {
                     rtt.sample(t0.duration(to: now))
                     rttProbeSeq = nil
@@ -63,7 +75,7 @@ extension TCPControlBlock {
 
         if segment.hasFIN {
             let finSeq = segment.seq
-                &+ UInt32(payload.count)
+                &+ UInt32(rawPayload.count)
                 &+ (segment.hasSYN ? 1 : 0)
             if finSeq != rcvNxt, !queuedOutOfOrder, !suppressAck {
                 if shouldEmitDupAck(now: now) {
@@ -120,22 +132,7 @@ extension TCPControlBlock {
         switch kind {
         case .sendSynAck:
             sndNxt = iss &+ 1
-            let opts = TCPOptions(
-                mss: maxMss,
-                windowScale: windowScaleEnabled ? rcvWndShift : nil,
-                sackPermitted: true,
-                tfoCookie: segment?.options.tfoCookie
-            )
-            return [
-                .send(
-                    flags: .syn.union(.ack),
-                    seq: iss,
-                    ack: rcvNxt,
-                    window: advertisedWindow,
-                    payload: Data(),
-                    options: opts
-                ),
-            ]
+            return [synAck()]
         case .sendAck:
             return [
                 emitAck(),
@@ -167,8 +164,10 @@ extension TCPControlBlock {
                     options: ackOptions()
                 ),
             ]
-        case .sendData, .retransmit:
-            return emitData(retransmit: kind == .retransmit)
+        case .sendData:
+            return emitData(retransmit: false)
+        case .retransmit:
+            return retransmitOldest()
         case .windowProbe:
             return emitWindowProbe()
         case .keepAliveProbe:
@@ -190,9 +189,8 @@ extension TCPControlBlock {
             updateRcvWnd()
             return [.deliver(data)]
         case .maybeDeliverTFO:
-            guard tfoEnabled, !tfoDelivered, !payload.isEmpty else { return [] }
-            tfoDelivered = true
-            return [.deliver(payload)]
+            // SYN data is queued in `recvBuffer` and flushed by `.deliverData` after ESTABLISHED.
+            return []
         case .established:
             return [.established]
         case .closed:
@@ -222,4 +220,70 @@ extension TCPControlBlock {
         }
     }
 
+    /// RFC 7323: the window field of a SYN is never scaled.
+    var synWindow: UInt16 { UInt16(min(rcvWnd, UInt32(UInt16.max))) }
+
+    func synAck() -> TCPAction {
+        .send(
+            flags: .syn.union(.ack),
+            seq: iss,
+            ack: rcvNxt,
+            window: synWindow,
+            payload: Data(),
+            options: TCPOptions(
+                mss: maxMss,
+                windowScale: windowScaleEnabled ? rcvWndShift : nil,
+                sackPermitted: true,
+                tfoCookie: synAckCookie
+            )
+        )
+    }
+
+    func synOptions() -> TCPOptions {
+        TCPOptions(mss: maxMss, windowScale: rcvWndShift, sackPermitted: true, tfoCookie: nil)
+    }
+
+    /// RTO: resend the oldest unacknowledged thing — SYN, SYN-ACK, data, or FIN.
+    func retransmitOldest() -> [TCPAction] {
+        switch state {
+        case .synSent:
+            return [.send(flags: .syn, seq: iss, ack: 0, window: synWindow, payload: Data(), options: synOptions())]
+        case .synReceived:
+            return [synAck()]
+        default:
+            break
+        }
+        rttProbeSeq = nil
+        rttProbeTime = nil
+        if (sendBuffer?.count ?? 0) > 0 {
+            return emitData(retransmit: true)
+        }
+        if finSent, Seq.lt(sndUna, sndNxt) {
+            return [
+                .send(
+                    flags: .fin.union(.ack),
+                    seq: sndNxt &- 1,
+                    ack: rcvNxt,
+                    window: advertisedWindow,
+                    payload: Data(),
+                    options: ackOptions()
+                ),
+            ]
+        }
+        return []
+    }
+
+    /// Server TFO cookie: keyed by the client address with the per-process random hash seed.
+    static func tfoCookie(for address: IPAddress) -> Data {
+        var hasher = Hasher()
+        hasher.combine(address)
+        hasher.combine(0x5446_4F43 as UInt32) // domain separator
+        var value = UInt64(bitPattern: Int64(hasher.finalize())).bigEndian
+        return withUnsafeBytes(of: &value) { Data($0) }
+    }
+
+    func tfoCookieValid(_ cookie: Data?) -> Bool {
+        guard tfoEnabled, let cookie, !cookie.isEmpty else { return false }
+        return cookie == Self.tfoCookie(for: flow.src)
+    }
 }

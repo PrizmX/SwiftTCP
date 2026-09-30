@@ -44,12 +44,14 @@ actor TCPEventLoop {
         outbound.reserveCapacity(packets.count)
         var established: [FlowKey] = []
         var delivered: [(FlowKey, Data)] = []
+        var finished: [FlowKey] = []
         var closed: [FlowKey] = []
         for packet in packets {
             let result = process(segment: packet.segment, data: packet.data, now: now)
             outbound.append(contentsOf: result.outbound)
             established.append(contentsOf: result.established)
             delivered.append(contentsOf: result.delivered)
+            finished.append(contentsOf: result.finished)
             closed.append(contentsOf: result.closed)
             resumeSendWaitersIfNeeded(packet.flow)
         }
@@ -58,6 +60,7 @@ actor TCPEventLoop {
             outbound: coalesced,
             established: established,
             delivered: delivered,
+            finished: finished,
             closed: closed
         )
         tick(now: now)
@@ -92,6 +95,7 @@ actor TCPEventLoop {
         var outbound: [OutboundPacket] = []
         var established: [FlowKey] = []
         var delivered: [(FlowKey, Data)] = []
+        var finished: [FlowKey] = []
         var closed: [FlowKey] = []
         outbound.reserveCapacity(items.count)
         for (flow, data) in items {
@@ -100,12 +104,14 @@ actor TCPEventLoop {
             outbound.append(contentsOf: result.outbound)
             established.append(contentsOf: result.established)
             delivered.append(contentsOf: result.delivered)
+            finished.append(contentsOf: result.finished)
             closed.append(contentsOf: result.closed)
         }
         emit(
             outbound: Self.coalescePureAcks(outbound),
             established: established,
             delivered: delivered,
+            finished: finished,
             closed: closed
         )
         armPoll()
@@ -163,6 +169,7 @@ actor TCPEventLoop {
         var outbound: [OutboundPacket] = []
         var established: [FlowKey] = []
         var delivered: [(FlowKey, Data)] = []
+        var finished: [FlowKey] = []
         var closed: [FlowKey] = []
     }
 
@@ -248,13 +255,14 @@ actor TCPEventLoop {
         var result = ActionEffects()
         for action in actions {
             switch action {
-            case .send(let flags, let seq, let ack, _, let payload, let options):
+            case .send(let flags, let seq, let ack, let window, let payload, let options):
                 let tx = PacketBuilder.tcp(
                     flow: pcb.flow.reversed,
                     seq: seq,
                     ack: ack,
                     flags: flags,
-                    window: pcb.advertisedWindow,
+                    // SYN windows are unscaled (RFC 7323); keep the one the TCB computed.
+                    window: flags.contains(.syn) ? window : pcb.advertisedWindow,
                     options: options,
                     payload: payload,
                     pool: txPool
@@ -300,11 +308,15 @@ actor TCPEventLoop {
                     pcb.appBuffered += data.count
                     pcb.updateRcvWnd()
                 }
+            case .peerFinished:
+                result.finished.append(pcb.flow)
             case .established:
                 result.established.append(pcb.flow)
             case .closed:
                 pcb.deadlines.clearAll()
+                guard pcbs[pcb.flow] === pcb else { break }
                 pcbs.removeValue(forKey: pcb.flow)
+                budget.release()
                 resumeSendWaiters(pcb.flow)
                 recycle(pcb)
                 result.closed.append(pcb.flow)
@@ -323,6 +335,7 @@ actor TCPEventLoop {
             outbound: result.outbound,
             established: result.established,
             delivered: result.delivered,
+            finished: result.finished,
             closed: result.closed
         )
     }
@@ -333,6 +346,7 @@ actor TCPEventLoop {
         outbound: [OutboundPacket],
         established: [FlowKey],
         delivered: [(FlowKey, Data)],
+        finished: [FlowKey],
         closed: [FlowKey]
     ) {
         if !outbound.isEmpty {
@@ -340,6 +354,7 @@ actor TCPEventLoop {
         }
         for flow in established { streams.onEstablished(flow: flow) }
         for item in delivered { streams.onData(flow: item.0, data: item.1) }
+        for flow in finished { streams.onPeerFinished(flow: flow) }
         for flow in closed { streams.onClosed(flow: flow) }
     }
 
