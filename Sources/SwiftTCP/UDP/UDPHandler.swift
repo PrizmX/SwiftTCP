@@ -80,6 +80,10 @@ actor UDPHandler: UDPReplyPath {
 
     func sendReply(flow: FlowKey, payload: Data) async {
         guard sessions[flow] != nil else { return }
+        // An upstream reply can exceed one IP datagram (UDP-over-stream frames,
+        // an IPv6 peer answering a FakeIP IPv4 flow). There is no fragmentation
+        // on this path, and encoding it would overflow the length fields.
+        guard payload.count <= UDPPacket.maxPayload(for: flow.src.version) else { return }
         sessions[flow]?.lastSeen = ContinuousClock().now
         let tx = UDPPacket.encapsulate(flow: flow.reversed, payload: payload)
         sink.write(bytes: tx.asSharedData(), protocolFamily: AddressFamily.of(flow.src.version))

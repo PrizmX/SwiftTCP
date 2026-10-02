@@ -32,6 +32,16 @@ public struct UDPDatagram: Sendable, Equatable {
 }
 
 public enum UDPPacket: Sendable {
+    /// Largest payload one unfragmented datagram carries: the IPv4 total
+    /// length and the IPv6 payload length are 16-bit fields.
+    public static func maxPayload(for version: IPVersion) -> Int {
+        switch version {
+        case .v4: 0xFFFF - 20 - 8
+        case .v6: 0xFFFF - 8
+        }
+    }
+
+    /// `payload` must not exceed `maxPayload(for:)`.
     public static func encapsulate(flow: FlowKey, payload: Data, ttl: UInt8 = 64) -> PacketBuffer {
         switch flow.src.version {
         case .v4: ipv4(flow: flow, payload: payload, ttl: ttl)

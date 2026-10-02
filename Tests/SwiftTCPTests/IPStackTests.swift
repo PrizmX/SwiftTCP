@@ -178,3 +178,25 @@ private let server6 = IPAddress(v6High: 0x20010db800000000, v6Low: 2)
     #expect(await udp.sessionCount() == 0)
     #expect(sink.snapshot().isEmpty)
 }
+
+@Test func oversizedUDPReplyIsDroppedNotTrapped() async throws {
+    for (flow, max) in [
+        (FlowKey(src: client, srcPort: 53_000, dst: server, dstPort: 443), 65_507),
+        (FlowKey(src: client6, srcPort: 53_000, dst: server6, dstPort: 443), 65_527),
+    ] {
+        #expect(UDPPacket.maxPayload(for: flow.src.version) == max)
+        let sink = RecordingSink()
+        let udp = UDPHandler(sink: sink)
+        udp.setUpstream(NoopUDPHandler())
+        let packet = UDPPacket.encapsulate(flow: flow, payload: Data([1])).asSharedData()
+        await udp.ingest(header: try IPHeader.peek(packet), packet: packet)
+
+        await udp.sendReply(flow: flow, payload: Data(count: max + 1))
+        #expect(sink.snapshot().isEmpty)
+        await udp.sendReply(flow: flow, payload: Data(count: max))
+        let sent = try #require(sink.snapshot().first)
+        let reply = try UDPDatagram.parse(packet: sent, ip: try IPHeader.peek(sent))
+        #expect(reply.payloadLength == max)
+        #expect(reply.flow == flow.reversed)
+    }
+}
