@@ -372,6 +372,74 @@ private func sendPayloadCount(_ action: TCPAction) -> Int? {
     })
 }
 
+/// RFC 5681 §2: data segments and window updates that leave the ACK at SND.UNA are not dup ACKs.
+@Test func dataAndWindowUpdatesAreNotDupAcks() {
+    let pcb = TCPControlBlock(flow: testFlow(), state: .listen, iss: 5000)
+    handshake(pcb: pcb)
+    _ = pcb.onAppSend(Data(repeating: 1, count: Int(pcb.mss) * 4))
+    let una = pcb.sndUna
+    let cwnd = pcb.congestion.cwnd
+    #expect(pcb.inflight > 0)
+    func retransmitsUna(_ actions: [TCPAction]) -> Bool {
+        actions.contains { action in
+            if case .sendFromBuffer(_, let seq, _, _, _, _, _) = action { return seq == una }
+            return false
+        }
+    }
+    func segment(seq: UInt32, window: UInt16, payloadLength: Int = 0) -> TCPSegment {
+        TCPSegment(
+            flow: pcb.flow, seq: seq, ack: una, flags: payloadLength > 0 ? [.ack, .psh] : .ack, window: window,
+            dataOffset: 20, payloadOffset: 40, payloadLength: payloadLength,
+            options: .empty, ipHeaderLength: 20, version: .v4
+        )
+    }
+
+    // Bidirectional flow: the peer uploads while our data is in flight.
+    var seq: UInt32 = 1001
+    for _ in 0..<3 {
+        let actions = pcb.onSegment(segment(seq: seq, window: 65_535, payloadLength: 100), payload: Data(repeating: 2, count: 100))
+        seq &+= 100
+        #expect(!retransmitsUna(actions))
+    }
+    // Window updates.
+    for window: UInt16 in [60_000, 50_000, 40_000] {
+        #expect(!retransmitsUna(pcb.onSegment(segment(seq: seq, window: window), payload: Data())))
+    }
+    #expect(pcb.dupAcks == 0)
+    #expect(pcb.recoveryMark == nil)
+    #expect(pcb.congestion.cwnd == cwnd)
+
+    // Three true duplicates still trigger fast retransmit.
+    let dup = segment(seq: seq, window: 40_000)
+    #expect(!retransmitsUna(pcb.onSegment(dup, payload: Data())))
+    #expect(!retransmitsUna(pcb.onSegment(dup, payload: Data())))
+    #expect(retransmitsUna(pcb.onSegment(dup, payload: Data())))
+    #expect(pcb.recoveryMark != nil)
+}
+
+@Test func pureAcksWithNothingOutstandingAreNotDupAcks() {
+    let pcb = TCPControlBlock(flow: testFlow(), state: .listen, iss: 5000)
+    handshake(pcb: pcb)
+    #expect(pcb.inflight == 0)
+    let ack = TCPSegment(
+        flow: pcb.flow, seq: 1001, ack: pcb.sndUna, flags: .ack, window: 65_535,
+        dataOffset: 20, payloadOffset: 40, payloadLength: 0,
+        options: .empty, ipHeaderLength: 20, version: .v4
+    )
+    for _ in 0..<3 { _ = pcb.onSegment(ack, payload: Data()) }
+    #expect(pcb.dupAcks == 0)
+    // A later send must not inherit a stale count: one real dup ACK is not a loss.
+    _ = pcb.onAppSend(Data(repeating: 1, count: Int(pcb.mss)))
+    let una = pcb.sndUna
+    let actions = pcb.onSegment(ack, payload: Data())
+    #expect(pcb.dupAcks == 1)
+    #expect(!actions.contains { action in
+        if case .sendFromBuffer(_, let seq, _, _, _, _, _) = action { return seq == una }
+        return false
+    })
+    #expect(pcb.recoveryMark == nil)
+}
+
 @Test func partialAckKeepsRetransmitTimerArmed() {
     let pcb = TCPControlBlock(flow: testFlow(), state: .listen, iss: 5000)
     handshake(pcb: pcb)

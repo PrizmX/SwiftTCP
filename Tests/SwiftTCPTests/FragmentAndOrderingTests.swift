@@ -17,14 +17,17 @@ private func ipv4Checksum(_ header: [UInt8]) -> UInt16 {
 }
 
 /// One IPv4 fragment of datagram `id`: `offset` in bytes (multiple of 8).
-private func fragment(id: UInt16, offset: Int, more: Bool, payload: [UInt8], proto: UInt8 = 17) -> Data {
-    let total = 20 + payload.count
+private func fragment(
+    id: UInt16, offset: Int, more: Bool, payload: [UInt8], proto: UInt8 = 17, options: [UInt8] = []
+) -> Data {
+    let headerLength = 20 + options.count
+    let total = headerLength + payload.count
     let field = UInt16(offset / 8) | (more ? 0x2000 : 0)
     var header: [UInt8] = [
-        0x45, 0, UInt8(total >> 8), UInt8(total & 0xff),
+        0x40 | UInt8(headerLength / 4), 0, UInt8(total >> 8), UInt8(total & 0xff),
         UInt8(id >> 8), UInt8(id & 0xff), UInt8(field >> 8), UInt8(field & 0xff),
         64, proto, 0, 0,
-    ] + fragSrc + fragDst
+    ] + fragSrc + fragDst + options
     let checksum = ipv4Checksum(header)
     header[10] = UInt8(checksum >> 8)
     header[11] = UInt8(checksum & 0xff)
@@ -91,6 +94,34 @@ private func udpFragments(id: UInt16, body: [UInt8], cuts: [Int]) -> (udp: [UInt
     #expect(reassembler.add(fragment(id: 3, offset: 16, more: false, payload: Array(repeating: 0, count: 8))) == .pending)
     #expect(reassembler.add(fragment(id: 3, offset: 32, more: false, payload: Array(repeating: 0, count: 8))) == .dropped(2))
     #expect(reassembler.inFlight == 0)
+}
+
+@Test func oversizedReassemblyIsDroppedNotTrapped() {
+    // Each fragment fits the 16-bit total length on its own (60 + 65_472 and 20 + 65_512),
+    // but with the first fragment's 60-byte header the datagram would be 65_572 bytes.
+    let options = [UInt8](repeating: 1, count: 40) // 40 x NOP
+    let head = fragment(id: 9, offset: 0, more: true, payload: Array(repeating: 0, count: 65_472), options: options)
+    let tail = fragment(id: 9, offset: 65_472, more: false, payload: Array(repeating: 0, count: 40))
+
+    let reassembler = IPv4Reassembler()
+    #expect(reassembler.add(head) == .pending)
+    #expect(reassembler.add(tail) == .dropped(2))
+    #expect(reassembler.inFlight == 0)
+
+    // Same when the long header arrives last.
+    #expect(reassembler.add(tail) == .pending)
+    #expect(reassembler.add(head) == .dropped(2))
+    #expect(reassembler.inFlight == 0)
+
+    // At exactly 65_535 bytes the datagram is still reassembled.
+    let fits = fragment(id: 10, offset: 65_472, more: false, payload: Array(repeating: 0, count: 3))
+    #expect(reassembler.add(fragment(id: 10, offset: 0, more: true, payload: Array(repeating: 0, count: 65_472), options: options)) == .pending)
+    guard case .complete(let datagram) = reassembler.add(fits) else {
+        Issue.record("expected a complete datagram")
+        return
+    }
+    #expect(datagram.count == 0xffff)
+    #expect(Int(datagram[2]) << 8 | Int(datagram[3]) == 0xffff)
 }
 
 @Test func expiresAndEvictsIncompleteDatagrams() {

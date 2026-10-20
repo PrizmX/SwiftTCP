@@ -138,6 +138,14 @@ final class TCPControlBlock: @unchecked Sendable {
         }
     }
 
+    /// RFC 9293 synchronized states: RCV.NXT is known.
+    static func synchronized(_ state: TCPState) -> Bool {
+        switch state {
+        case .established, .finWait1, .finWait2, .closeWait, .closing, .lastAck, .timeWait: true
+        default: false
+        }
+    }
+
     /// Bytes that still fit under the send-buffer cap (including grow room).
     var sendAvailable: Int {
         max(0, maxSendBytes - (sendBuffer?.count ?? 0))
@@ -167,6 +175,11 @@ final class TCPControlBlock: @unchecked Sendable {
         acceptedFIN = false
         queuedOutOfOrder = false
         suppressAck = false
+        // RFC 9293 3.10.7.4: a zero-length segment left of RCV.NXT is unacceptable and must be
+        // ACKed. That is the BSD / XNU keep-alive probe (SEQ = SND.UNA - 1): unanswered, the
+        // peer's kernel times the connection out. Its ACK field is still processed (as BSD does).
+        let staleProbe = Self.synchronized(state) && payload.isEmpty
+            && !segment.hasSYN && !segment.hasFIN && Seq.lt(segment.seq, rcvNxt)
         let unaBefore = sndUna
         applyPassive(segment: segment, payload: payload, now: now)
         let newlyAcked = Seq.lt(unaBefore, sndUna)
@@ -197,6 +210,9 @@ final class TCPControlBlock: @unchecked Sendable {
             if state == .timeWait {
                 actions.append(.schedule(.timeWait, timerConfig.timeWait))
             }
+        } else if staleProbe, state != .closed {
+            actions.append(emitAck())
+            actions.append(.cancel(.delayedAck))
         }
         if newlyAcked {
             if inflight == 0 {

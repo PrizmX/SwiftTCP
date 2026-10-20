@@ -95,7 +95,11 @@ final class IPv4Reassembler: Sendable {
             let conflictingEnd = !fragment.moreFragments
                 && (datagram.total.map { $0 != piece.end } ?? false
                     || datagram.pieces.contains { $0.end > piece.end })
-            if overlaps || pastEnd || conflictingEnd
+            // The first fragment's header (IHL up to 60) heads the reassembled datagram, so it
+            // can overflow the 16-bit total length even when every fragment fits on its own.
+            let headerLength = piece.offset == 0 ? fragment.header.count : datagram.header?.count ?? 0
+            let oversized = headerLength + max(piece.end, datagram.pieces.last?.end ?? 0) > 0xffff
+            if overlaps || pastEnd || conflictingEnd || oversized
                 || state.bytes + piece.data.count > limits.maxBytes
             {
                 return .dropped(dropped + discard(key, from: &state) + 1)

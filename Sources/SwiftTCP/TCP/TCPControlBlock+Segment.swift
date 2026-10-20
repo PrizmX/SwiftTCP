@@ -11,6 +11,7 @@ extension TCPControlBlock {
             let acceptData = opening && (!passive || tfoCookieValid(segment.options.tfoCookie))
             if !acceptData { payload = Data() }
         }
+        let sndWndBefore = sndWnd
         if segment.hasSYN, opening {
             irs = segment.seq
             rcvNxt = segment.seq &+ 1
@@ -48,7 +49,11 @@ extension TCPControlBlock {
                     rttProbeTime = nil
                 }
                 congestion.onAck(acked: acked, rtt: rtt.srtt, inflight: inflight, now: now)
-            } else if state == .established {
+            } else if state == .established, rawPayload.isEmpty, !segment.hasSYN, !segment.hasFIN,
+                      sndWnd == sndWndBefore, inflight > 0
+            {
+                // RFC 5681 §2: only a pure ACK repeating SND.UNA with an unchanged window while
+                // data is outstanding is a duplicate; data segments and window updates are not.
                 dupAcks &+= 1
             }
             if !segment.options.sackBlocks.isEmpty {
