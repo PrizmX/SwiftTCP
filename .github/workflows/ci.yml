@@ -1,0 +1,33 @@
+# Runs the SwiftTCP test suite on pull requests and pushes to main.
+# No secrets.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # Same image and Xcode pin as the PrizmX release workflow.
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      # Actions are pinned to full commit SHAs; the comment names the tag.
+      - name: Checkout SwiftTCP
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Test
+        run: swift test
