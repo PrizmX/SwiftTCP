@@ -240,6 +240,40 @@ private func drainDownload(
     #expect(closes.snapshot().last == UDPCloseRecorder.Entry(flow: flow2, reason: .closed))
 }
 
+@Test func resetAllFlowsResetsEveryFlowAndKeepsTheStackRunning() async throws {
+    let sink = RecordingSink()
+    let events = CollectingHandler()
+    let closes = UDPCloseRecorder()
+    let stack = SwiftStack(
+        config: SwiftStackConfig(tcp: TCPStackConfig(loopCount: 1)),
+        sink: sink,
+        streams: events,
+        datagrams: closes
+    )
+    let flow = testFlow(40_200)
+    await stack.ingest(tcpPacket(flow: flow, seq: 1_000, ack: 0, flags: .syn))
+    let synAck = try IPPacket.parse(PacketBuffer(wrapping: sink.snapshot()[0])).segment
+    await stack.ingest(tcpPacket(flow: flow, seq: 1_001, ack: synAck.seq &+ 1, flags: .ack))
+    let udpFlow = FlowKey(src: clientAddr, srcPort: 40_201, dst: serverAddr, dstPort: 443)
+    await stack.ingest(UDPPacket.encapsulate(flow: udpFlow, payload: Data([1])).asSharedData())
+    sink.removeAll()
+
+    let reset = await stack.resetAllFlows()
+    #expect(reset.tcp == 1)
+    #expect(reset.udp == 1)
+    let sent = try sink.snapshot().map { try IPPacket.parse(PacketBuffer(wrapping: $0)).segment }
+    #expect(sent.contains { $0.hasRST && $0.flow == flow.reversed })
+    #expect(events.snapshot().closed == [flow])
+    #expect(closes.snapshot() == [UDPCloseRecorder.Entry(flow: udpFlow, reason: .closed)])
+    #expect(await stack.connectionCount() == 0)
+
+    // The same 4-tuple connects again.
+    sink.removeAll()
+    await stack.ingest(tcpPacket(flow: flow, seq: 5_000, ack: 0, flags: .syn))
+    let again = try IPPacket.parse(PacketBuffer(wrapping: sink.snapshot()[0])).segment
+    #expect(again.hasSYN && again.hasACK)
+}
+
 private final class UDPCloseRecorder: UDPDatagramHandler, @unchecked Sendable {
     struct Entry: Equatable {
         var flow: FlowKey

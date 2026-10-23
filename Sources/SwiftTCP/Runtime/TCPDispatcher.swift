@@ -124,6 +124,15 @@ actor TCPDispatcher: TCPByteStream {
         await loops[index].connect(flow: flow)
     }
 
+    /// Resets every live connection on every loop; returns how many.
+    func abortAll() async -> Int {
+        var total = 0
+        for loop in loops {
+            total += await loop.abortAll()
+        }
+        return total
+    }
+
     func shutdown() async {
         await withTaskGroup(of: Void.self) { group in
             for loop in loops {

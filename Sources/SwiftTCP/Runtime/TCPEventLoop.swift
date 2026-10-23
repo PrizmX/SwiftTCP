@@ -142,6 +142,19 @@ actor TCPEventLoop {
         armPoll()
     }
 
+    /// RST toward the client on every live connection; the loop keeps
+    /// running. TIME-WAIT is left to expire: both sides already closed.
+    @discardableResult
+    func abortAll() -> Int {
+        let now = ContinuousClock().now
+        let live = pcbs.values.filter { $0.state != .timeWait }
+        for pcb in live {
+            commit(pcb.abort(now: now), pcb: pcb)
+        }
+        armPoll()
+        return live.count
+    }
+
     func shutdown() {
         pollTask?.cancel()
         pollTask = nil

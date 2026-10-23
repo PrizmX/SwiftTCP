@@ -68,14 +68,18 @@ actor UDPHandler: UDPReplyPath {
 
     func sessionCount() -> Int { sessions.count }
 
-    func closeAll() {
+    /// Drops every session; the upstream hears `reason` for each. A later
+    /// datagram opens a new session.
+    @discardableResult
+    func closeAll(reason: UDPSessionCloseReason = .shutdown) -> Int {
         pollTask?.cancel()
         pollTask = nil
         let flows = Array(sessions.keys)
         sessions.removeAll()
         for flow in flows {
-            upstreamSlot.handler.onUDPSessionClosed(flow: flow, reason: .shutdown)
+            upstreamSlot.handler.onUDPSessionClosed(flow: flow, reason: reason)
         }
+        return flows.count
     }
 
     func sendReply(flow: FlowKey, payload: Data) async {

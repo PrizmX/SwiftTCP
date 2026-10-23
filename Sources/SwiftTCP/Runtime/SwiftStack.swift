@@ -112,6 +112,17 @@ public actor SwiftStack: TCPByteStream {
         await tcp.shutdown()
     }
 
+    /// Resets every flow and keeps the stack running: each TCP connection
+    /// gets a RST toward the client and each UDP session is dropped
+    /// (`.closed`), so clients reconnect. For a network change, which
+    /// leaves the upstream sockets on the old path.
+    @discardableResult
+    nonisolated public func resetAllFlows() async -> (tcp: Int, udp: Int) {
+        let connections = await tcp.abortAll()
+        let sessions = await udp.closeAll(reason: .closed)
+        return (connections, sessions)
+    }
+
     public func connectionCount() async -> Int {
         await tcp.connectionCount()
     }
